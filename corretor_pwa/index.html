@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b3268">
+  <meta name="description" content="Corretor instalavel de gabaritos por scanner ao vivo para Sistemas de Controle.">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <title>Corretor de Gabaritos</title>
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <p class="kicker">CEFET-MG</p>
+      <h1>Corretor de Gabaritos</h1>
+      <p>Sistemas de Controle</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="section-title">
+        <h2>Corrigir folha</h2>
+        <span id="app-status" class="status">Carregando gabarito...</span>
+      </div>
+
+      <label for="student-name">Nome do aluno</label>
+      <input id="student-name" type="text" autocomplete="name" placeholder="Digite ou confira o nome">
+
+      <label for="student-class">Turma</label>
+      <input id="student-class" type="text" placeholder="Ex.: 2 Eletronica">
+
+      <div class="scanner-live">
+        <div class="scanner-view">
+          <video id="scanner-video" playsinline muted></video>
+          <canvas id="scanner-overlay"></canvas>
+          <div class="scanner-guide" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+        <p id="scanner-status" class="hint scanner-status">Inicie o scanner e enquadre a folha inteira, com os quatro quadrados pretos visiveis.</p>
+        <div class="actions scanner-actions">
+          <button id="start-scanner-button" class="primary" type="button" disabled>Iniciar scanner</button>
+          <button id="stop-scanner-button" type="button" disabled>Parar camera</button>
+        </div>
+      </div>
+
+      <div class="fallback-block">
+        <label for="sheet-photo">Foto do gabarito</label>
+        <input id="sheet-photo" type="file" accept="image/*" capture="environment">
+        <p class="hint">Modo de emergencia: fotografe a folha inteira, com os quatro quadrados pretos visiveis e sem sombra forte sobre as bolhas.</p>
+      </div>
+
+      <label for="manual-version">Tipo da prova, se a leitura automatica falhar</label>
+      <select id="manual-version">
+        <option value="">Detectar automaticamente</option>
+        <option value="A">Tipo A</option>
+        <option value="B">Tipo B</option>
+        <option value="C">Tipo C</option>
+        <option value="D">Tipo D</option>
+      </select>
+      <p class="hint">Use este campo quando o app encontrar os delimitadores, mas nao reconhecer a marcacao A/B/C/D.</p>
+
+      <div class="actions">
+        <button id="correct-button" class="primary" disabled>Corrigir foto</button>
+        <button id="reset-form-button" type="button">Corrigir outro</button>
+      </div>
+    </section>
+
+    <section id="result-panel" class="panel result-panel" hidden>
+      <div class="section-title">
+        <h2>Resultado</h2>
+        <span id="result-badge" class="badge"></span>
+      </div>
+      <div id="result-summary" class="summary-grid"></div>
+      <div id="result-warnings" class="warnings"></div>
+      <div id="result-details" class="details"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title">
+        <h2>Resultados salvos</h2>
+        <span id="saved-count" class="status">0 correcoes</span>
+      </div>
+      <div class="actions">
+        <button id="export-button" type="button">Exportar CSV</button>
+        <button id="clear-button" type="button" class="danger">Limpar resultados</button>
+      </div>
+      <div id="saved-results" class="saved-results"></div>
+    </section>
+  </main>
+
+  <template id="saved-result-template">
+    <article class="saved-card">
+      <div>
+        <strong class="saved-name"></strong>
+        <p class="saved-meta"></p>
+      </div>
+      <span class="saved-grade"></span>
+    </article>
+  </template>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
