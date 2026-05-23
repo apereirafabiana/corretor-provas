@@ -212,6 +212,10 @@ input[type="file"] {
   font-weight: 700;
 }
 
+.scanner-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .fallback-block {
   border-top: 1px solid var(--line);
   margin-top: 14px;

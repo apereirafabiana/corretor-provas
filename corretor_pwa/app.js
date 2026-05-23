@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-05-23-fast-marker-scanner-1";
+const APP_VERSION = "2026-05-23-paper-first-scan-now-1";
 const SCANNER_FRAME_INTERVAL_MS = 250;
 const RESULTS_KEY = "cefet_corretor_resultados_v1";
 const HAS_DOM = typeof document !== "undefined";
@@ -16,6 +16,10 @@ const state = {
     lastSignature: "",
     stableCount: 0,
     resolutionLabel: "",
+    lastGray: null,
+    lastMarkers: null,
+    lastGeometry: null,
+    lastResult: null,
   },
 };
 
@@ -31,6 +35,7 @@ const els = {
   scannerOverlay: $("#scanner-overlay"),
   scannerStatus: $("#scanner-status"),
   startScanner: $("#start-scanner-button"),
+  scanNow: $("#scan-now-button"),
   stopScanner: $("#stop-scanner-button"),
   correct: $("#correct-button"),
   resetForm: $("#reset-form-button"),
@@ -74,6 +79,7 @@ async function init() {
 function wireEvents() {
   els.correct.addEventListener("click", handleCorrection);
   els.startScanner.addEventListener("click", startScanner);
+  els.scanNow.addEventListener("click", handleScanNow);
   els.stopScanner.addEventListener("click", () => stopScanner(true));
   els.resetForm.addEventListener("click", resetForm);
   els.exportButton.addEventListener("click", exportCsv);
@@ -101,6 +107,7 @@ function updateCameraAvailability() {
   if (!els.startScanner || !els.scannerStatus) return;
   const available = cameraAvailable();
   els.startScanner.disabled = !available;
+  els.scanNow.disabled = true;
   if (!available) {
     els.scannerStatus.textContent =
       "Scanner ao vivo disponivel apenas em HTTPS ou localhost. Use a foto como backup.";
@@ -144,6 +151,7 @@ async function startScanner() {
     await els.scannerVideo.play();
     updateScannerResolutionLabel();
     els.startScanner.disabled = true;
+    els.scanNow.disabled = true;
     els.stopScanner.disabled = false;
     setScannerStatus(`Procurando os quatro quadrados pretos (${state.scanner.resolutionLabel})...`);
     state.scanner.raf = requestAnimationFrame(scannerLoop);
@@ -204,29 +212,90 @@ function processScannerFrame() {
     const gray = prepareGray(els.scannerVideo);
     const markers = findMarkers(gray);
     drawScannerOverlay(gray, markers);
+    rememberScannerFrame(gray, markers);
 
-    const result = correctGray(gray, readStudentForm(), markers);
-    const signature = scannerSignature(result);
-    if (signature === state.scanner.lastSignature) {
+    const geometry = markerGeometry(markers, gray);
+    if (scannerGeometryStable(geometry, state.scanner.lastGeometry)) {
       state.scanner.stableCount += 1;
     } else {
-      state.scanner.lastSignature = signature;
+      state.scanner.lastGeometry = geometry;
       state.scanner.stableCount = 1;
     }
 
-    const needed = 3;
-    setScannerStatus(`${scannerSuccessMessage(gray, markers)} Segure parado: ${state.scanner.stableCount}/${needed}`);
-    if (state.scanner.stableCount >= needed) finishScannerCorrection(result);
+    let result = null;
+    let correctionError = null;
+    try {
+      result = correctGray(gray, readStudentForm(), markers);
+      state.scanner.lastResult = result;
+    } catch (error) {
+      correctionError = error;
+      state.scanner.lastResult = null;
+    }
+
+    const needed = 2;
+    if (result) {
+      setScannerStatus(`${scannerSuccessMessage(gray, markers)} Segure parado: ${state.scanner.stableCount}/${needed}`);
+      if (state.scanner.stableCount >= needed) finishScannerCorrection(result);
+    } else if (correctionError?.message.includes("Tipo de prova")) {
+      setScannerStatus("Folha encontrada. Selecione o tipo A/B/C/D ou toque em Corrigir agora.");
+    } else {
+      setScannerStatus(`${scannerSuccessMessage(gray, markers)} Toque em Corrigir agora ou ajuste luz/foco.`);
+    }
   } catch (error) {
     resetScannerStability();
+    clearScannerFrame();
     clearScannerOverlay();
     setScannerStatus(scannerErrorMessage(error.message));
   }
 }
 
-function scannerSignature(result) {
-  const marked = result.detalhes.map((item) => item.marcada || "-").join("");
-  return `${result.versao}|${marked}|${result.avisos.join("|")}`;
+function rememberScannerFrame(gray, markers) {
+  state.scanner.lastGray = gray;
+  state.scanner.lastMarkers = markers;
+  if (els.scanNow) els.scanNow.disabled = false;
+}
+
+function markerGeometry(markers, gray) {
+  const box = markerBoundingBox(markers);
+  const centerX = (box.minX + box.maxX) / 2 / gray.width;
+  const centerY = (box.minY + box.maxY) / 2 / gray.height;
+  return {
+    centerX,
+    centerY,
+    width: box.width / gray.width,
+    height: box.height / gray.height,
+    points: [markers.tl, markers.tr, markers.bl, markers.br].map(([x, y]) => [x / gray.width, y / gray.height]),
+  };
+}
+
+function scannerGeometryStable(current, previous) {
+  if (!previous) return false;
+  const centerShift = Math.hypot(current.centerX - previous.centerX, current.centerY - previous.centerY);
+  const sizeShift = Math.abs(current.width - previous.width) + Math.abs(current.height - previous.height);
+  let pointShift = 0;
+  for (let i = 0; i < current.points.length; i += 1) {
+    pointShift += Math.hypot(current.points[i][0] - previous.points[i][0], current.points[i][1] - previous.points[i][1]);
+  }
+  return centerShift < 0.025 && sizeShift < 0.055 && pointShift / current.points.length < 0.035;
+}
+
+function handleScanNow() {
+  if (!state.scanner.lastGray || !state.scanner.lastMarkers) {
+    setScannerStatus("Enquadre a folha ate aparecer o contorno verde.");
+    return;
+  }
+
+  setScannerStatus("Corrigindo...");
+  try {
+    const result = correctGray(state.scanner.lastGray, readStudentForm(), state.scanner.lastMarkers);
+    finishScannerCorrection(result);
+  } catch (error) {
+    if (error.message.includes("Tipo de prova")) {
+      setScannerStatus("Selecione o tipo A/B/C/D e toque em Corrigir agora.");
+    } else {
+      showError(error.message);
+    }
+  }
 }
 
 function finishScannerCorrection(result) {
@@ -245,6 +314,7 @@ function stopScanner(showMessage = true) {
   state.scanner.active = false;
   state.scanner.locked = false;
   resetScannerStability();
+  clearScannerFrame();
 
   if (state.scanner.stream) {
     for (const track of state.scanner.stream.getTracks()) track.stop();
@@ -252,6 +322,7 @@ function stopScanner(showMessage = true) {
   state.scanner.stream = null;
   if (els.scannerVideo) els.scannerVideo.srcObject = null;
   if (els.stopScanner) els.stopScanner.disabled = true;
+  if (els.scanNow) els.scanNow.disabled = true;
   if (els.startScanner) els.startScanner.disabled = !cameraAvailable();
   if (showMessage) {
     clearScannerOverlay();
@@ -263,6 +334,15 @@ function resetScannerStability() {
   state.scanner.lastSignature = "";
   state.scanner.stableCount = 0;
   state.scanner.lastProcessAt = 0;
+  state.scanner.lastGeometry = null;
+  state.scanner.lastResult = null;
+}
+
+function clearScannerFrame() {
+  state.scanner.lastGray = null;
+  state.scanner.lastMarkers = null;
+  state.scanner.lastResult = null;
+  if (els.scanNow) els.scanNow.disabled = true;
 }
 
 function setScannerStatus(message) {
@@ -296,7 +376,7 @@ function markerBoundingBox(markers) {
   const maxX = Math.max(...xs);
   const minY = Math.min(...ys);
   const maxY = Math.max(...ys);
-  return { width: maxX - minX, height: maxY - minY };
+  return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
 }
 
 function syncScannerOverlay() {
@@ -522,6 +602,7 @@ function findMarkers(gray) {
     mask[i] = gray.data[i] <= threshold ? 1 : 0;
   }
   const ii = integralImage(mask, gray.width, gray.height);
+  const paper = detectPaperRegion(gray);
 
   const corners = {
     tl: [0.0, 0.0, 0.35, 0.35],
@@ -541,20 +622,30 @@ function findMarkers(gray) {
     bl: [0.0, 0.38, 0.55, 1.0],
     br: [0.45, 0.38, 1.0, 1.0],
   };
+  const regionSets = [];
+  if (paper) {
+    regionSets.push(markerRegionsFromPaper(gray, paper, 0.11));
+    regionSets.push(markerRegionsFromPaper(gray, paper, 0.18));
+  }
+  regionSets.push(corners, preferred, broad);
 
-  for (const regions of [corners, preferred, broad]) {
+  for (const regions of regionSets) {
     try {
       const markers = {};
       const densities = [];
       for (const [key, region] of Object.entries(regions)) {
         const marker = bestSquare(ii, gray.width, gray.height, region);
-        if (marker.density < 0.46) throw new Error("baixa densidade");
+        if (marker.density < 0.4) throw new Error("baixa densidade");
         markers[key] = [marker.x, marker.y];
         densities.push(marker.density);
+      }
+      if (!markersHavePlausibleGeometry(markers, gray.width, gray.height)) {
+        throw new Error("geometria improvavel");
       }
       markers._meta = {
         threshold,
         minDensity: Math.min(...densities),
+        paperCoverage: paper?.coverage || 0,
       };
       return markers;
     } catch {
@@ -563,6 +654,116 @@ function findMarkers(gray) {
   }
 
   throw new Error("Não localizei os quatro marcadores pretos. Fotografe a folha inteira e evite sombras.");
+}
+
+function detectPaperRegion(gray) {
+  const histogram = new Int32Array(256);
+  for (let i = 0; i < gray.data.length; i += 1) histogram[gray.data[i]] += 1;
+  const p65 = percentileFromHistogram(histogram, gray.data.length, 0.65);
+  const p88 = percentileFromHistogram(histogram, gray.data.length, 0.88);
+  const brightThreshold = Math.round(clamp(Math.min(p65 - 22, p88 - 28), 130, 225));
+  const step = Math.max(2, Math.floor(Math.min(gray.width, gray.height) / 320));
+  let minX = gray.width;
+  let maxX = 0;
+  let minY = gray.height;
+  let maxY = 0;
+  let brightCount = 0;
+  let sampleCount = 0;
+
+  for (let y = 0; y < gray.height; y += step) {
+    const row = y * gray.width;
+    for (let x = 0; x < gray.width; x += step) {
+      sampleCount += 1;
+      if (gray.data[row + x] >= brightThreshold) {
+        brightCount += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (!brightCount || brightCount / Math.max(sampleCount, 1) < 0.06) return null;
+
+  const padding = Math.round(Math.min(gray.width, gray.height) * 0.025);
+  minX = clamp(minX - padding, 0, gray.width - 1);
+  maxX = clamp(maxX + padding, 1, gray.width);
+  minY = clamp(minY - padding, 0, gray.height - 1);
+  maxY = clamp(maxY + padding, 1, gray.height);
+
+  const width = maxX - minX;
+  const height = maxY - minY;
+  if (width < gray.width * 0.32 || height < gray.height * 0.32) return null;
+
+  return {
+    x0: minX,
+    y0: minY,
+    x1: maxX,
+    y1: maxY,
+    width,
+    height,
+    coverage: (width * height) / (gray.width * gray.height),
+  };
+}
+
+function markerRegionsFromPaper(gray, paper, margin) {
+  const pageW = Number(state.layout?.page_width_pt) || 595.2755905511812;
+  const pageH = Number(state.layout?.page_height_pt) || 841.8897637795277;
+  const markers = state.layout?.markers_pt || {
+    tl: [58, 604],
+    tr: [537.2755905511812, 604],
+    bl: [58, 136],
+    br: [537.2755905511812, 136],
+  };
+  const halfW = Math.max(gray.width * 0.035, paper.width * margin);
+  const halfH = Math.max(gray.height * 0.035, paper.height * margin);
+  const regions = {};
+
+  for (const key of ["tl", "tr", "bl", "br"]) {
+    const [ptX, ptY] = markers[key];
+    const x = paper.x0 + (ptX / pageW) * paper.width;
+    const y = paper.y0 + ((pageH - ptY) / pageH) * paper.height;
+    regions[key] = [
+      clamp(Math.max(paper.x0, x - halfW) / gray.width, 0, 1),
+      clamp(Math.max(paper.y0, y - halfH) / gray.height, 0, 1),
+      clamp(Math.min(paper.x1, x + halfW) / gray.width, 0, 1),
+      clamp(Math.min(paper.y1, y + halfH) / gray.height, 0, 1),
+    ];
+  }
+
+  return regions;
+}
+
+function markersHavePlausibleGeometry(markers, width, height) {
+  const { tl, tr, bl, br } = markers;
+  if (!(tl[0] < tr[0] && bl[0] < br[0] && tl[1] < bl[1] && tr[1] < br[1])) return false;
+
+  const top = Math.hypot(tr[0] - tl[0], tr[1] - tl[1]);
+  const bottom = Math.hypot(br[0] - bl[0], br[1] - bl[1]);
+  const left = Math.hypot(bl[0] - tl[0], bl[1] - tl[1]);
+  const right = Math.hypot(br[0] - tr[0], br[1] - tr[1]);
+  const box = markerBoundingBox(markers);
+
+  if (box.width < width * 0.18 || box.height < height * 0.18) return false;
+  if (top < width * 0.16 || bottom < width * 0.16 || left < height * 0.16 || right < height * 0.16) return false;
+
+  const widthRatio = Math.min(top, bottom) / Math.max(top, bottom);
+  const heightRatio = Math.min(left, right) / Math.max(left, right);
+  if (widthRatio < 0.42 || heightRatio < 0.42) return false;
+
+  const area = polygonArea([tl, tr, br, bl]);
+  return area > width * height * 0.035;
+}
+
+function polygonArea(points) {
+  let sum = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const [x1, y1] = points[i];
+    const [x2, y2] = points[(i + 1) % points.length];
+    sum += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(sum) / 2;
 }
 
 function adaptiveDarkThreshold(values) {
@@ -618,10 +819,10 @@ function clamp(value, min, max) {
 }
 
 function bestSquare(ii, width, height, region) {
-  const x0 = Math.floor(region[0] * width);
-  const y0 = Math.floor(region[1] * height);
-  const x1 = Math.floor(region[2] * width);
-  const y1 = Math.floor(region[3] * height);
+  const x0 = Math.floor(clamp(region[0], 0, 1) * width);
+  const y0 = Math.floor(clamp(region[1], 0, 1) * height);
+  const x1 = Math.floor(clamp(region[2], 0, 1) * width);
+  const y1 = Math.floor(clamp(region[3], 0, 1) * height);
   const minSize = Math.max(8, Math.floor(width * 0.008));
   const maxSize = Math.min(120, Math.max(minSize + 2, Math.floor(width * 0.075)));
   let best = null;
@@ -635,12 +836,21 @@ function bestSquare(ii, width, height, region) {
       for (let x = x0; x <= maxX; x += step) {
         const dark = rectSum(ii, width, x, y, size);
         const density = dark / (size * size);
-        if (density < 0.42) continue;
+        if (density < 0.34) continue;
+        const margin = Math.max(4, Math.floor(size * 0.42));
+        const outer = rectSumBox(ii, width, height, x - margin, y - margin, x + size + margin, y + size + margin);
+        const outerArea =
+          (clamp(x + size + margin, 0, width) - clamp(x - margin, 0, width)) *
+          (clamp(y + size + margin, 0, height) - clamp(y - margin, 0, height));
+        const borderArea = Math.max(1, outerArea - size * size);
+        const borderDensity = Math.max(0, (outer - dark) / borderArea);
+        if (borderDensity > 0.66) continue;
         const expectedSize = width * 0.03;
         const sizePenalty = Math.abs(size - expectedSize) / Math.max(expectedSize, 1);
-        const score = dark * density * (1 / (1 + sizePenalty * 0.28));
+        const whiteMarginBoost = 1 / (1 + borderDensity * 2.2);
+        const score = dark * density * whiteMarginBoost * (1 / (1 + sizePenalty * 0.28));
         if (!best || score > best.score) {
-          best = { x: x + size / 2, y: y + size / 2, density, score };
+          best = { x: x + size / 2, y: y + size / 2, density, score, borderDensity };
         }
       }
     }
@@ -668,6 +878,16 @@ function rectSum(ii, width, x, y, size) {
   const x2 = x + size;
   const y2 = y + size;
   return ii[y2 * stride + x2] - ii[y * stride + x2] - ii[y2 * stride + x] + ii[y * stride + x];
+}
+
+function rectSumBox(ii, width, height, x0, y0, x1, y1) {
+  const stride = width + 1;
+  const left = Math.floor(clamp(x0, 0, width));
+  const top = Math.floor(clamp(y0, 0, height));
+  const right = Math.floor(clamp(x1, 0, width));
+  const bottom = Math.floor(clamp(y1, 0, height));
+  if (right <= left || bottom <= top) return 0;
+  return ii[bottom * stride + right] - ii[top * stride + right] - ii[bottom * stride + left] + ii[top * stride + left];
 }
 
 function homography(src, dst) {

@@ -55,6 +55,66 @@ function makeGraySheet(version = "A", includeVersion = true) {
   return { width, height, data };
 }
 
+function makeGraySheetOnDarkBackground(version = "D") {
+  const layout = api.state.layout;
+  const keys = api.state.gabaritos.versions[version];
+  const width = 1280;
+  const height = 1800;
+  const data = new Uint8ClampedArray(width * height).fill(24);
+  const paper = { x: 160, y: 90, w: 960, h: 1360 };
+  const pageW = layout.page_width_pt;
+  const pageH = layout.page_height_pt;
+  const conv = ([x, y]) => [
+    Math.round(paper.x + (x / pageW) * paper.w),
+    Math.round(paper.y + ((pageH - y) / pageH) * paper.h),
+  ];
+
+  function setPixel(x, y, value) {
+    if (x >= 0 && x < width && y >= 0 && y < height) data[y * width + x] = value;
+  }
+
+  for (let y = paper.y; y < paper.y + paper.h; y += 1) {
+    for (let x = paper.x; x < paper.x + paper.w; x += 1) {
+      const shadow = x < paper.x + paper.w * 0.18 ? 218 : 238;
+      setPixel(x, y, shadow);
+    }
+  }
+
+  function square(center, size, value = 0) {
+    const [cx, cy] = conv(center);
+    const half = Math.round((size / pageW) * paper.w / 2);
+    for (let y = cy - half; y <= cy + half; y += 1) {
+      for (let x = cx - half; x <= cx + half; x += 1) setPixel(x, y, value);
+    }
+  }
+
+  function circle(center, radiusPt, fill = false) {
+    const [cx, cy] = conv(center);
+    const radius = Math.max(3, Math.round((radiusPt / pageW) * paper.w));
+    const inner = Math.max(1, radius - 2);
+    for (let y = cy - radius; y <= cy + radius; y += 1) {
+      for (let x = cx - radius; x <= cx + radius; x += 1) {
+        const dist2 = (x - cx) ** 2 + (y - cy) ** 2;
+        if (fill && dist2 <= radius ** 2) setPixel(x, y, 0);
+        if (!fill && dist2 <= radius ** 2 && dist2 >= inner ** 2) setPixel(x, y, 0);
+      }
+    }
+  }
+
+  for (const center of Object.values(layout.markers_pt)) square(center, layout.marker_size_pt);
+  for (const center of Object.values(layout.version_bubbles_pt)) circle(center, layout.bubble_radius_pt + 1);
+  for (const row of Object.values(layout.answer_bubbles_pt)) {
+    for (const center of Object.values(row)) circle(center, layout.bubble_radius_pt);
+  }
+
+  circle(layout.version_bubbles_pt[version], layout.bubble_radius_pt + 1, true);
+  keys.forEach((answer, index) => {
+    circle(layout.answer_bubbles_pt[String(index + 1)][answer], layout.bubble_radius_pt, true);
+  });
+
+  return { width, height, data };
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -85,4 +145,8 @@ assert(manualResult.versao === "A", `Versão manual esperada A, obtida ${manualR
 assert(manualResult.versionSource === "manual", `Origem esperada manual, obtida ${manualResult.versionSource}`);
 assert(manualResult.acertos === 20, `Acertos esperados 20 no modo manual, obtidos ${manualResult.acertos}`);
 
-console.log(`PWA algorithm test ok: tipo A, 20/20, nota ${api.state.gabaritos.total_points}, erro sem versão e fallback manual validados.`);
+const darkResult = api.correctGray(makeGraySheetOnDarkBackground("D"), { nome: "Fundo escuro", turma: "T" });
+assert(darkResult.versao === "D", `VersÃ£o esperada D em fundo escuro, obtida ${darkResult.versao}`);
+assert(darkResult.acertos === 20, `Acertos esperados 20 em fundo escuro, obtidos ${darkResult.acertos}`);
+
+console.log(`PWA algorithm test ok: tipo A, fundo escuro tipo D, 20/20, nota ${api.state.gabaritos.total_points}, erro sem versao e fallback manual validados.`);

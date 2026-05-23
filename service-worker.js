@@ -1,4 +1,4 @@
-const CACHE_NAME = "corretor-cefet-v3-fast-marker-scanner";
+const CACHE_NAME = "corretor-cefet-v4-paper-first-scan-now";
 const ASSETS = [
   "./",
   "./index.html",
