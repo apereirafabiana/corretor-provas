@@ -1,4 +1,5 @@
-const APP_VERSION = "2026-05-20-live-scanner-1";
+const APP_VERSION = "2026-05-23-fast-marker-scanner-1";
+const SCANNER_FRAME_INTERVAL_MS = 250;
 const RESULTS_KEY = "cefet_corretor_resultados_v1";
 const HAS_DOM = typeof document !== "undefined";
 
@@ -14,6 +15,7 @@ const state = {
     lastProcessAt: 0,
     lastSignature: "",
     stableCount: 0,
+    resolutionLabel: "",
   },
 };
 
@@ -127,7 +129,8 @@ async function startScanner() {
       video: {
         facingMode: { ideal: "environment" },
         width: { ideal: 1920 },
-        height: { ideal: 1080 },
+        height: { ideal: 1440 },
+        aspectRatio: { ideal: 1.3333333333 },
       },
     });
 
@@ -137,10 +140,12 @@ async function startScanner() {
     resetScannerStability();
     els.scannerVideo.srcObject = stream;
     await waitForVideoReady(els.scannerVideo);
+    await tuneCameraTrack(stream);
     await els.scannerVideo.play();
+    updateScannerResolutionLabel();
     els.startScanner.disabled = true;
     els.stopScanner.disabled = false;
-    setScannerStatus("Procurando os quatro quadrados pretos...");
+    setScannerStatus(`Procurando os quatro quadrados pretos (${state.scanner.resolutionLabel})...`);
     state.scanner.raf = requestAnimationFrame(scannerLoop);
   } catch (error) {
     stopScanner(false);
@@ -156,9 +161,36 @@ function waitForVideoReady(video) {
   });
 }
 
+async function tuneCameraTrack(stream) {
+  const [track] = stream.getVideoTracks();
+  if (!track || typeof track.getCapabilities !== "function" || typeof track.applyConstraints !== "function") return;
+
+  const capabilities = track.getCapabilities();
+  const advanced = [];
+  if (capabilities.focusMode?.includes("continuous")) advanced.push({ focusMode: "continuous" });
+  if (capabilities.exposureMode?.includes("continuous")) advanced.push({ exposureMode: "continuous" });
+  if (capabilities.whiteBalanceMode?.includes("continuous")) advanced.push({ whiteBalanceMode: "continuous" });
+
+  if (advanced.length) {
+    try {
+      await track.applyConstraints({ advanced });
+    } catch {
+      // Some browsers expose the capability but reject the constraint. The scanner still works.
+    }
+  }
+}
+
+function updateScannerResolutionLabel() {
+  const [track] = state.scanner.stream?.getVideoTracks?.() || [];
+  const settings = track?.getSettings?.() || {};
+  const width = settings.width || els.scannerVideo.videoWidth || 0;
+  const height = settings.height || els.scannerVideo.videoHeight || 0;
+  state.scanner.resolutionLabel = width && height ? `${width}x${height}` : "camera ativa";
+}
+
 function scannerLoop(timestamp) {
   if (!state.scanner.active || state.scanner.locked) return;
-  if (timestamp - state.scanner.lastProcessAt >= 450) {
+  if (timestamp - state.scanner.lastProcessAt >= SCANNER_FRAME_INTERVAL_MS) {
     state.scanner.lastProcessAt = timestamp;
     processScannerFrame();
   }
@@ -173,7 +205,7 @@ function processScannerFrame() {
     const markers = findMarkers(gray);
     drawScannerOverlay(gray, markers);
 
-    const result = correctGray(gray, readStudentForm());
+    const result = correctGray(gray, readStudentForm(), markers);
     const signature = scannerSignature(result);
     if (signature === state.scanner.lastSignature) {
       state.scanner.stableCount += 1;
@@ -183,7 +215,7 @@ function processScannerFrame() {
     }
 
     const needed = 3;
-    setScannerStatus(`Folha encontrada. Segure parado: ${state.scanner.stableCount}/${needed}`);
+    setScannerStatus(`${scannerSuccessMessage(gray, markers)} Segure parado: ${state.scanner.stableCount}/${needed}`);
     if (state.scanner.stableCount >= needed) finishScannerCorrection(result);
   } catch (error) {
     resetScannerStability();
@@ -238,9 +270,33 @@ function setScannerStatus(message) {
 }
 
 function scannerErrorMessage(message) {
+  const resolution = state.scanner.resolutionLabel ? ` (${state.scanner.resolutionLabel})` : "";
   if (message.includes("marcadores")) return "Aproxime ou afaste ate aparecerem os quatro quadrados pretos.";
   if (message.includes("Tipo de prova")) return "Folha encontrada. Marque o tipo A/B/C/D ou selecione manualmente.";
-  return "Ajuste luz, foco e enquadramento da folha.";
+  return `Ajuste luz, foco e enquadramento da folha${resolution}.`;
+}
+
+function scannerSuccessMessage(gray, markers) {
+  const box = markerBoundingBox(markers);
+  const coverage = (box.width * box.height) / (gray.width * gray.height);
+  const minDensity = markers._meta?.minDensity ?? 1;
+  const resolution = state.scanner.resolutionLabel ? ` (${state.scanner.resolutionLabel})` : "";
+
+  if (coverage < 0.18) return `Folha encontrada, mas esta longe. Aproxime um pouco${resolution}.`;
+  if (coverage > 0.88) return `Folha encontrada, mas esta muito perto. Afaste um pouco${resolution}.`;
+  if (minDensity < 0.5) return `Folha encontrada. Melhore a luz ou o foco${resolution}.`;
+  return `Folha encontrada${resolution}.`;
+}
+
+function markerBoundingBox(markers) {
+  const points = [markers.tl, markers.tr, markers.bl, markers.br];
+  const xs = points.map(([x]) => x);
+  const ys = points.map(([, y]) => y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  return { width: maxX - minX, height: maxY - minY };
 }
 
 function syncScannerOverlay() {
@@ -344,8 +400,8 @@ function correctImage(image, student) {
   return correctGray(gray, student);
 }
 
-function correctGray(gray, student) {
-  const detectedMarkers = findMarkers(gray);
+function correctGray(gray, student, detectedMarkersOverride = null) {
+  const detectedMarkers = detectedMarkersOverride || findMarkers(gray);
   const markerKeys = ["tl", "tr", "bl", "br"];
   const src = markerKeys.map((key) => state.layout.markers_pt[key]);
   const dst = markerKeys.map((key) => detectedMarkers[key]);
@@ -460,32 +516,46 @@ function prepareGray(image) {
 }
 
 function findMarkers(gray) {
+  const threshold = adaptiveDarkThreshold(gray.data);
   const mask = new Uint8Array(gray.width * gray.height);
   for (let i = 0; i < gray.data.length; i += 1) {
-    mask[i] = gray.data[i] < 90 ? 1 : 0;
+    mask[i] = gray.data[i] <= threshold ? 1 : 0;
   }
+  const ii = integralImage(mask, gray.width, gray.height);
 
+  const corners = {
+    tl: [0.0, 0.0, 0.35, 0.35],
+    tr: [0.65, 0.0, 1.0, 0.35],
+    bl: [0.0, 0.65, 0.35, 1.0],
+    br: [0.65, 0.65, 1.0, 1.0],
+  };
   const preferred = {
-    tl: [0.04, 0.16, 0.36, 0.62],
-    tr: [0.64, 0.16, 0.96, 0.62],
-    bl: [0.04, 0.45, 0.36, 0.95],
-    br: [0.64, 0.45, 0.96, 0.95],
+    tl: [0.04, 0.12, 0.40, 0.64],
+    tr: [0.60, 0.12, 0.96, 0.64],
+    bl: [0.04, 0.40, 0.40, 0.98],
+    br: [0.60, 0.40, 0.96, 0.98],
   };
   const broad = {
-    tl: [0.0, 0.0, 0.5, 0.55],
-    tr: [0.5, 0.0, 1.0, 0.55],
-    bl: [0.0, 0.45, 0.5, 1.0],
-    br: [0.5, 0.45, 1.0, 1.0],
+    tl: [0.0, 0.0, 0.55, 0.62],
+    tr: [0.45, 0.0, 1.0, 0.62],
+    bl: [0.0, 0.38, 0.55, 1.0],
+    br: [0.45, 0.38, 1.0, 1.0],
   };
 
-  for (const regions of [preferred, broad]) {
+  for (const regions of [corners, preferred, broad]) {
     try {
       const markers = {};
+      const densities = [];
       for (const [key, region] of Object.entries(regions)) {
-        const marker = bestSquare(mask, gray.width, gray.height, region);
-        if (marker.density < 0.62) throw new Error("baixa densidade");
+        const marker = bestSquare(ii, gray.width, gray.height, region);
+        if (marker.density < 0.46) throw new Error("baixa densidade");
         markers[key] = [marker.x, marker.y];
+        densities.push(marker.density);
       }
+      markers._meta = {
+        threshold,
+        minDensity: Math.min(...densities),
+      };
       return markers;
     } catch {
       // Try the broader regions.
@@ -495,27 +565,80 @@ function findMarkers(gray) {
   throw new Error("Não localizei os quatro marcadores pretos. Fotografe a folha inteira e evite sombras.");
 }
 
-function bestSquare(mask, width, height, region) {
+function adaptiveDarkThreshold(values) {
+  const histogram = new Int32Array(256);
+  for (let i = 0; i < values.length; i += 1) histogram[values[i]] += 1;
+
+  const p08 = percentileFromHistogram(histogram, values.length, 0.08);
+  const p45 = percentileFromHistogram(histogram, values.length, 0.45);
+  const otsu = otsuThreshold(histogram, values.length);
+  const percentileThreshold = p08 + (p45 - p08) * 0.55;
+  return Math.round(clamp(Math.max(percentileThreshold, otsu * 0.82), 72, 145));
+}
+
+function percentileFromHistogram(histogram, total, fraction) {
+  const target = Math.max(1, Math.floor(total * fraction));
+  let running = 0;
+  for (let i = 0; i < histogram.length; i += 1) {
+    running += histogram[i];
+    if (running >= target) return i;
+  }
+  return 255;
+}
+
+function otsuThreshold(histogram, total) {
+  let sum = 0;
+  for (let i = 0; i < 256; i += 1) sum += i * histogram[i];
+
+  let sumBackground = 0;
+  let weightBackground = 0;
+  let maxVariance = -1;
+  let threshold = 90;
+
+  for (let i = 0; i < 256; i += 1) {
+    weightBackground += histogram[i];
+    if (weightBackground === 0) continue;
+    const weightForeground = total - weightBackground;
+    if (weightForeground === 0) break;
+
+    sumBackground += i * histogram[i];
+    const meanBackground = sumBackground / weightBackground;
+    const meanForeground = (sum - sumBackground) / weightForeground;
+    const variance = weightBackground * weightForeground * (meanBackground - meanForeground) ** 2;
+    if (variance > maxVariance) {
+      maxVariance = variance;
+      threshold = i;
+    }
+  }
+  return threshold;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function bestSquare(ii, width, height, region) {
   const x0 = Math.floor(region[0] * width);
   const y0 = Math.floor(region[1] * height);
   const x1 = Math.floor(region[2] * width);
   const y1 = Math.floor(region[3] * height);
-  const ii = integralImage(mask, width, height);
-  const minSize = Math.max(12, Math.floor(width * 0.014));
-  const maxSize = Math.min(90, Math.max(minSize + 2, Math.floor(width * 0.06)));
+  const minSize = Math.max(8, Math.floor(width * 0.008));
+  const maxSize = Math.min(120, Math.max(minSize + 2, Math.floor(width * 0.075)));
   let best = null;
-  const sizeStep = Math.max(2, Math.floor(width * 0.004));
+  const sizeStep = Math.max(2, Math.floor(width * 0.003));
 
   for (let size = minSize; size <= maxSize; size += sizeStep) {
-    const step = Math.max(2, Math.floor(size / 5));
+    const step = Math.max(2, Math.floor(size / 4));
     const maxY = Math.max(y0, y1 - size);
     const maxX = Math.max(x0, x1 - size);
     for (let y = y0; y <= maxY; y += step) {
       for (let x = x0; x <= maxX; x += step) {
         const dark = rectSum(ii, width, x, y, size);
         const density = dark / (size * size);
-        if (density < 0.58) continue;
-        const score = dark * density;
+        if (density < 0.42) continue;
+        const expectedSize = width * 0.03;
+        const sizePenalty = Math.abs(size - expectedSize) / Math.max(expectedSize, 1);
+        const score = dark * density * (1 / (1 + sizePenalty * 0.28));
         if (!best || score > best.score) {
           best = { x: x + size / 2, y: y + size / 2, density, score };
         }
